@@ -32,9 +32,13 @@ namespace Microsoft.Azure.Mobile.Server.DynamicsCrm
         protected string EntityLogicalName { get; set; }
         protected IEntityMapper<TTableData, TEntity> Map { get; private set; }
 
-        public string CrmUrlSettingsKey { get; set; }
-        public string CrmAuthorityUrlSettingsKey { get; set; }
-        public string CrmClientSecretSettingsKey { get; set; }
+        public const string CrmUrlSettingsKey = "CrmUrl";
+        public const string CrmAuthorityUrlSettingsKey = "CrmAuthorityUrl";
+        public const string CrmClientSecretSettingsKey = "CrmClientSecret";
+        public const string CrmIsApiAppKey = "IsApiApp";
+        public const string ClientIdSettingsKey = "AzureActiveDirectoryClientId";
+        public const string CrmServerUserNameSettingsKey = "CrmServerUserName";
+        public const string CrmServerUserPasswordSettingsKey = "CrmServerUserPassword";
 
         /// <summary>
         /// Creates a new instance of <see cref="DynamicsCrmDomainmanager{TTableData,TEntity}"/>
@@ -49,37 +53,69 @@ namespace Microsoft.Azure.Mobile.Server.DynamicsCrm
             var entityAttribs = typeof(TEntity).GetCustomAttributes(typeof(EntityLogicalNameAttribute), false);
             if (entityAttribs.Length != 1) throw new InvalidOperationException("Could not determine entity logical name from entity type.");
             EntityLogicalName = ((EntityLogicalNameAttribute)entityAttribs[0]).LogicalName;
-
-            CrmUrlSettingsKey = "CrmUrl";
-            CrmAuthorityUrlSettingsKey = "CrmAuthorityUrl";
-            CrmClientSecretSettingsKey = "CrmClientSecret";
+            
         }
 
         private IOrganizationService _organizationService;
+        internal async Task<string> AcquireOnbehalfOfToken(string crmUrl)
+        {
+            var settings = this.Services.Settings;
+            string authorityUrl = settings[CrmAuthorityUrlSettingsKey];
+            string clientSecret = settings[CrmClientSecretSettingsKey];
+            string clientId = settings[ClientIdSettingsKey];
+
+            var user = this.Request.GetRequestContext().Principal as ServiceUser;
+
+            var creds = await user.GetIdentityAsync<AzureActiveDirectoryCredentials>();
+            AuthenticationContext ac = new AuthenticationContext(authorityUrl, false);
+
+            var ar = await ac.AcquireTokenAsync(crmUrl, 
+                        new ClientCredential(clientId, clientSecret), 
+                        new UserAssertion(creds.AccessToken));
+            if (ar == null) return null;
+            return ar.AccessToken;
+
+        }
+        internal async Task<string> AcquireServerToken(string crmUrl)
+        {
+            var settings = this.Services.Settings;
+            string authorityUrl = settings[CrmAuthorityUrlSettingsKey];
+            string clientId = settings[ClientIdSettingsKey];
+            string username = settings[CrmServerUserNameSettingsKey];
+            string password = settings[CrmServerUserPasswordSettingsKey];
+
+            AuthenticationContext ac = new AuthenticationContext(authorityUrl, false);
+
+            var creds = new UserCredential("kirillg@donnam.onmicrosoft.com", "pass@word1");
+            var ar = await ac.AcquireTokenAsync(crmUrl, clientId, creds );
+            if (ar == null) return null;
+            return ar.AccessToken;
+        }
         protected async Task<IOrganizationService> GetOrganizationServiceAsync() 
         { 
             if(_organizationService == null)
             {
                 var settings = this.Services.Settings;
-
+                var isApiApp = settings[CrmIsApiAppKey];
+                
                 string crmUrl = settings[CrmUrlSettingsKey];
                 string servicePath = "/XRMServices/2011/Organization.svc/web";
                 string version = "7.0.0.0";
-                string authorityUrl = settings[CrmAuthorityUrlSettingsKey];
-                string clientSecret = settings[CrmClientSecretSettingsKey];
-                string serviceUri = String.Concat(crmUrl, servicePath, "?SdkClientVersion=", version);
+                
+                //string serviceUri = String.Concat(crmUrl, servicePath, "?SdkClientVersion=", version);
 
-                var user = this.Request.GetRequestContext().Principal as ServiceUser;
-
-                var creds = await user.GetIdentityAsync<AzureActiveDirectoryCredentials>();
-                AuthenticationContext ac = new AuthenticationContext(authorityUrl, false);
-
-                var ar = ac.AcquireToken(crmUrl, 
-                            new ClientCredential(settings["AzureActiveDirectoryClientId"], clientSecret), 
-                            new UserAssertion(creds.AccessToken));
+                string accessToken = null; 
+                if (isApiApp.Equals("true"))
+                {
+                    accessToken = await this.AcquireServerToken(crmUrl);
+                }
+                else
+                {
+                    accessToken = await this.AcquireOnbehalfOfToken(crmUrl);
+                }
 
                 var orgService = new OrganizationWebProxyClient(new Uri(crmUrl + servicePath), true);
-                orgService.HeaderToken = ar.AccessToken;
+                orgService.HeaderToken = accessToken;
                 orgService.SdkClientVersion = version;
 
                 _organizationService = orgService;
@@ -96,6 +132,7 @@ namespace Microsoft.Azure.Mobile.Server.DynamicsCrm
 
             var orgService = await GetOrganizationServiceAsync();
             orgService.Delete(EntityLogicalName, entityId);
+            
             return true;
         }
 
@@ -105,6 +142,12 @@ namespace Microsoft.Azure.Mobile.Server.DynamicsCrm
             var orgService = await GetOrganizationServiceAsync();
             entity.Id = orgService.Create(entity);
             return await LookupAsync(entity.Id);
+        }
+        public async Task Execute(OrganizationRequest request)
+        {
+            var orgService = await GetOrganizationServiceAsync();
+            var response = orgService.Execute(request);
+            this.Services.Log.Info("Service request executed, result: " + response.ResponseName);
         }
 
         public override SingleResult<TTableData> Lookup(string id)
@@ -131,6 +174,18 @@ namespace Microsoft.Azure.Mobile.Server.DynamicsCrm
             }
 
             return SingleResult.Create(results.AsQueryable());
+        }
+        private async Task<TTableData> LookupItemAsync(string id)
+        {
+            Guid entityId;
+            if (Guid.TryParse(id, out entityId))
+            {
+                return await LookupAsync(entityId);
+            }
+            else
+            {
+                return null;
+            }
         }
 
         public override IQueryable<TTableData> Query()
@@ -167,11 +222,20 @@ namespace Microsoft.Azure.Mobile.Server.DynamicsCrm
             return await LookupAsync(entity.Id);
         }
 
-        public override Task<TTableData> UpdateAsync(string id, System.Web.Http.OData.Delta<TTableData> patch)
+        public override async Task<TTableData> UpdateAsync(string id, System.Web.Http.OData.Delta<TTableData> patch)
         {
             // doesn't work with JSON, see
             // http://stackoverflow.com/questions/14729249/how-to-use-deltat-from-microsoft-asp-net-web-api-odata-with-code-first-jsonmed
-            throw new NotImplementedException();
+            TTableData current = await LookupItemAsync(id);
+            if (current != null)
+            {
+                patch.Patch(current);
+                return await ReplaceAsync(id, current);
+            }
+            else
+            {
+                return null;
+            }            
         }
 
         public override Task<TTableData> UndeleteAsync(string id, Delta<TTableData> patch)
