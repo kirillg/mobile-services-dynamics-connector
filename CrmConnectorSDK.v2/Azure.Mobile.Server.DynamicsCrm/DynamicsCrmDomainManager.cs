@@ -32,13 +32,16 @@ namespace Microsoft.Azure.Mobile.Server.DynamicsCrm
         protected string EntityLogicalName { get; set; }
         protected IEntityMapper<TTableData, TEntity> Map { get; private set; }
 
-        public const string CrmUrlSettingsKey = "CrmUrl";
-        public const string CrmAuthorityUrlSettingsKey = "CrmAuthorityUrl";
-        public const string CrmClientSecretSettingsKey = "CrmClientSecret";
-        public const string CrmIsApiAppKey = "IsApiApp";
-        public const string ClientIdSettingsKey = "AzureActiveDirectoryClientId";
-        public const string CrmServerUserNameSettingsKey = "CrmServerUserName";
-        public const string CrmServerUserPasswordSettingsKey = "CrmServerUserPassword";
+        public const string CrmUrlSettingsKey = "MSDC_TenantUrl";
+        public const string CrmAuthorityUrlSettingsKey = "MSDC_AADAuthorityUrl";
+        public const string CrmClientSecretSettingsKey = "MSDC_AADClientSecret";
+        public const string CrmAuthMethod = "MSDC_AuthMethod";
+        public const string CrmAuthOnBehalf = "OnBehalf";
+        public const string CrmAuthServiceUser = "ServiceUser";
+        public const string CrmAuthApiApp = "ApiApp";
+        public const string ClientIdSettingsKey = "MSDC_AADClientId";
+        public const string CrmServiceUserNameSettingsKey = "MSDC_ServiceUserName";
+        public const string CrmServiceUserPasswordSettingsKey = "MSDC_ServiceUserPassword";
 
         /// <summary>
         /// Creates a new instance of <see cref="DynamicsCrmDomainmanager{TTableData,TEntity}"/>
@@ -76,17 +79,17 @@ namespace Microsoft.Azure.Mobile.Server.DynamicsCrm
             return ar.AccessToken;
 
         }
-        internal async Task<string> AcquireServerToken(string crmUrl)
+        internal async Task<string> AcquireServiceToken(string crmUrl)
         {
             var settings = this.Services.Settings;
             string authorityUrl = settings[CrmAuthorityUrlSettingsKey];
             string clientId = settings[ClientIdSettingsKey];
-            string username = settings[CrmServerUserNameSettingsKey];
-            string password = settings[CrmServerUserPasswordSettingsKey];
+            string username = settings[CrmServiceUserNameSettingsKey];
+            string password = settings[CrmServiceUserPasswordSettingsKey];
 
             AuthenticationContext ac = new AuthenticationContext(authorityUrl, false);
 
-            var creds = new UserCredential("kirillg@donnam.onmicrosoft.com", "pass@word1");
+            var creds = new UserCredential(username, password);
             var ar = await ac.AcquireTokenAsync(crmUrl, clientId, creds );
             if (ar == null) return null;
             return ar.AccessToken;
@@ -96,7 +99,7 @@ namespace Microsoft.Azure.Mobile.Server.DynamicsCrm
             if(_organizationService == null)
             {
                 var settings = this.Services.Settings;
-                var isApiApp = settings[CrmIsApiAppKey];
+                var authMethod = settings[CrmAuthMethod];
                 
                 string crmUrl = settings[CrmUrlSettingsKey];
                 string servicePath = "/XRMServices/2011/Organization.svc/web";
@@ -105,9 +108,9 @@ namespace Microsoft.Azure.Mobile.Server.DynamicsCrm
                 //string serviceUri = String.Concat(crmUrl, servicePath, "?SdkClientVersion=", version);
 
                 string accessToken = null; 
-                if (isApiApp.Equals("true"))
+                if (authMethod.Equals(CrmAuthServiceUser))
                 {
-                    accessToken = await this.AcquireServerToken(crmUrl);
+                    accessToken = await this.AcquireServiceToken(crmUrl);
                 }
                 else
                 {
